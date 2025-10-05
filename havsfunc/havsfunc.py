@@ -9,39 +9,17 @@ from vsexprtools import norm_expr
 from vsrgtools import gauss_blur
 from vstools import (
     DitherType,
-    PlanesT,
-    check_ref_clip,
-    check_variable,
     core,
     depth,
     fallback,
     get_depth,
-    normalize_planes,
     scale_value,
+    sc_detect,
     vs,
 )
+from dfttest2 import DFTTest
 
-__all__ = [
-    "mt_clamp",
-    "QTGMC",
-    "scdetect",
-]
-
-
-def mt_clamp(
-    clip: vs.VideoNode,
-    bright: vs.VideoNode,
-    dark: vs.VideoNode,
-    overshoot: int = 0,
-    undershoot: int = 0,
-    planes: PlanesT = None,
-) -> vs.VideoNode:
-    """clamp the value of the clip between bright + overshoot and dark - undershoot"""
-    check_ref_clip(clip, bright, mt_clamp)
-    check_ref_clip(clip, dark, mt_clamp)
-    planes = normalize_planes(clip, planes)
-
-    return norm_expr([clip, bright, dark], f"x z {undershoot} - max y {overshoot} + min", planes)
+__all__ = ["QTGMC"]
 
 
 QTGMC_globals = {}
@@ -297,10 +275,10 @@ def QTGMC(
 
         NoisePreset: Automatic setting for quality of noise processing. Choices: "Slower", "Slow", "Medium", "Fast", and "Faster".
 
-        Denoiser: Select denoiser to use for noise bypass / denoising. Select from "bm3d", "dfttest", "fft3dfilter" or "knlmeanscl".
-            Unknown value selects "fft3dfilter".
+        Denoiser: Select denoiser to use for noise bypass / denoising. Select from "bm3d", "dfttest", "fft3d" or "nlmeans".
+            Unknown value selects "fft3d".
 
-        FftThreads: Number of threads to use if using "fft3dfilter" for Denoiser.
+        FftThreads: Number of threads to use if using "fft3d" for Denoiser.
 
         DenoiseMC: Whether to provide a motion-compensated clip to the denoiser for better noise vs detail detection (will be a little slower).
 
@@ -506,7 +484,7 @@ def QTGMC(
             SearchParam = 16
 
     # Noise presets                             Slower      Slow       Medium     Fast      Faster
-    Denoiser = fallback(Denoiser,             ['dfttest',  'dfttest', 'dfttest', 'fft3df', 'fft3df'][npNum]).lower()
+    Denoiser = fallback(Denoiser,             ['dfttest',  'dfttest', 'dfttest', 'fft3d', 'fft3d'][npNum]).lower()
     DenoiseMC = fallback(DenoiseMC,           [ True,       True,      False,     False,    False  ][npNum])
     NoiseTR = fallback(NoiseTR,               [ 2,          1,         1,         1,        0      ][npNum])
     NoiseDeint = fallback(NoiseDeint,         ['Generate', 'Bob',      '',        '',       ''     ][npNum]).lower()
@@ -624,7 +602,6 @@ def QTGMC(
     if totalRestore <= 0:
         StabilizeNoise = False
     noiseTD = [1, 3, 5][NoiseTR]
-    noiseCentre = scale_value(128.5, 8, bits) if Denoiser in ["fft3df", "fft3dfilter"] else neutral
 
     # MVTools settings
     Lambda = fallback(Lambda, (1000 if TrueMotion else 100) * BlockSize * BlockSize // 64)
@@ -702,11 +679,11 @@ def QTGMC(
     # These kernels are approximately Gaussian kernels, which work well as a prefilter before motion analysis (hence the original name for this script)
     # Create linear weightings of neighbors first
     if not isinstance(srchClip, vs.VideoNode):
-        bobbed = scdetect(bobbed, 28 / 255)
+        bobbed = sc_detect(bobbed, 28 / 255)
         if TR0 > 0:  # -2    -1    0     1     2
-            ts1 = bobbed.misc.AverageFrames([1] * 3, scenechange=True, planes=CMplanes)  # 0.00  0.33  0.33  0.33  0.00
+            ts1 = bobbed.std.AverageFrames([1] * 3, scenechange=True, planes=CMplanes)  # 0.00  0.33  0.33  0.33  0.00
         if TR0 > 1:
-            ts2 = bobbed.misc.AverageFrames([1] * 5, scenechange=True, planes=CMplanes)  # 0.20  0.20  0.20  0.20  0.20
+            ts2 = bobbed.std.AverageFrames([1] * 5, scenechange=True, planes=CMplanes)  # 0.20  0.20  0.20  0.20  0.20
 
     # Combine linear weightings to give binomial weightings - TR0=0: (1), TR0=1: (1:2:1), TR0=2: (1:4:6:4:1)
     if isinstance(srchClip, vs.VideoNode):
@@ -753,7 +730,7 @@ def QTGMC(
                 i7=scale_value(7, 8, bits), i2=scale_value(2, 8, bits)
             )
             srchClip = core.std.Expr([spatialBlur, tweaked], expr=expr if ChromaMotion or is_gray else [expr, ""])
-        srchClip = prefilter_to_full_range(srchClip, slope=Str)
+        srchClip = prefilter_to_full_range(srchClip, slope=Str, smooth=Amp)
         if bits > 8 and FastMA:
             srchClip = depth(srchClip, 8, dither_type=DitherType.NONE)
 
@@ -866,11 +843,11 @@ def QTGMC(
         if Denoiser == "bm3d":
             dnWindow = bm3d(noiseWindow, Sigma, NoiseTR, planes=CNplanes)
         elif Denoiser == "dfttest":
-            dnWindow = noiseWindow.dfttest.DFTTest(sigma=Sigma * 4, tbsize=noiseTD, planes=CNplanes)
-        elif Denoiser in ["knlm", "knlmeanscl"]:
+            dnWindow = DFTTest(noiseWindow, sigma=Sigma * 4, tbsize=noiseTD, planes=CNplanes)
+        elif Denoiser == "nlmeans":
             dnWindow = nl_means(noiseWindow, strength=Sigma, tr=NoiseTR, planes=CNplanes)
         else:
-            dnWindow = noiseWindow.fft3dfilter.FFT3DFilter(sigma=Sigma, planes=CNplanes, bt=noiseTD, ncpu=FftThreads)
+            dnWindow = noiseWindow.neo_fft3d.FFT3D(sigma=Sigma, planes=CNplanes, bt=noiseTD, ncpu=FftThreads)
 
         # Rework denoised clip to match source format - various code paths here: discard the motion compensation window, discard doubled lines (from point resize)
         # Also reweave to get interlaced noise if source was interlaced (could keep the full frame of noise, but it will be poor quality from the point resize)
@@ -1082,7 +1059,8 @@ def QTGMC(
     if SVThin > 0:
         expr = f"y x - {SVThinSc} * {neutral} +"
         vertMedD = core.std.Expr(
-            [lossed1, lossed1.rgvs.VerticalCleaner(mode=1 if is_gray else [1, 0])], expr=expr if is_gray else [expr, ""]
+            [lossed1, lossed1.zsmooth.VerticalCleaner(mode=1 if is_gray else [1, 0])],
+            expr=expr if is_gray else [expr, ""],
         )
         vertMedD = vertMedD.std.Convolution(matrix=[1, 2, 1], planes=0, mode="h")
         expr = f"y {neutral} - abs x {neutral} - abs > y {neutral} ?"
@@ -1107,11 +1085,11 @@ def QTGMC(
     # Occurs here (before final temporal smooth) if SLMode == 1,2. This location will restrict sharpness more, but any artefacts introduced will be smoothed
     if SLMode == 1:
         if SLRad <= 1:
-            sharpLimit1 = core.rgvs.Repair(backBlend1, edi, mode=1)
+            sharpLimit1 = core.zsmooth.Repair(backBlend1, edi, mode=1)
         else:
-            sharpLimit1 = core.rgvs.Repair(backBlend1, core.rgvs.Repair(backBlend1, edi, mode=12), mode=1)
+            sharpLimit1 = core.zsmooth.Repair(backBlend1, core.zsmooth.Repair(backBlend1, edi, mode=12), mode=1)
     elif SLMode == 2:
-        sharpLimit1 = mt_clamp(backBlend1, tMax, tMin, SOvs, SOvs)
+        sharpLimit1 = norm_expr([backBlend1, tMax, tMin], f"x z {SOvs} - max y {SOvs} + min")
     else:
         sharpLimit1 = backBlend1
 
@@ -1126,11 +1104,10 @@ def QTGMC(
         )
 
     # Add back any extracted noise, prior to final temporal smooth - this will restore detail that was removed as "noise" without restoring the noise itself
-    # Average luma of FFT3DFilter extracted noise is 128.5, so deal with that too
     if GrainRestore <= 0:
         addNoise1 = backBlend2
     else:
-        expr = f"x {noiseCentre} - {GrainRestore} * {neutral} +"
+        expr = f"x {neutral} - {GrainRestore} * {neutral} +"
         addNoise1 = core.std.MergeDiff(
             backBlend2, finalNoise.std.Expr(expr=expr if ChromaNoise or is_gray else [expr, ""]), planes=CNplanes
         )
@@ -1161,11 +1138,11 @@ def QTGMC(
     # Occurs here (after final temporal smooth) if SLMode == 3,4. Allows more sharpening here, but more prone to introducing minor artefacts
     if SLMode == 3:
         if SLRad <= 1:
-            sharpLimit2 = core.rgvs.Repair(repair2, edi, mode=1)
+            sharpLimit2 = core.zsmooth.Repair(repair2, edi, mode=1)
         else:
-            sharpLimit2 = core.rgvs.Repair(repair2, core.rgvs.Repair(repair2, edi, mode=12), mode=1)
+            sharpLimit2 = core.zsmooth.Repair(repair2, core.zsmooth.Repair(repair2, edi, mode=12), mode=1)
     elif SLMode >= 4:
-        sharpLimit2 = mt_clamp(repair2, tMax, tMin, SOvs, SOvs)
+        sharpLimit2 = norm_expr([repair2, tMax, tMin], f"x z {SOvs} - max y {SOvs} + min")
     else:
         sharpLimit2 = repair2
 
@@ -1177,11 +1154,10 @@ def QTGMC(
         lossed2 = sharpLimit2
 
     # Add back any extracted noise, after final temporal smooth. This will appear as noise/grain in the output
-    # Average luma of FFT3DFilter extracted noise is 128.5, so deal with that too
     if NoiseRestore <= 0:
         addNoise2 = lossed2
     else:
-        expr = f"x {noiseCentre} - {NoiseRestore} * {neutral} +"
+        expr = f"x {neutral} - {NoiseRestore} * {neutral} +"
         addNoise2 = core.std.MergeDiff(
             lossed2, finalNoise.std.Expr(expr=expr if ChromaNoise or is_gray else [expr, ""]), planes=CNplanes
         )
@@ -1299,11 +1275,11 @@ def QTGMC_Interpolate(
     field = 3 if TFF else 2
 
     if opencl:
-        nnedi3 = partial(core.nnedi3cl.NNEDI3CL, field=field, device=device, **nnedi3_args)
-        eedi3 = partial(core.eedi3m.EEDI3CL, field=field, planes=planes, mdis=EdiMaxD, device=device, **eedi3_args)
+        nnedi3 = partial(core.sneedif.NNEDI3, field=field, device=device, **nnedi3_args)
     else:
         nnedi3 = partial(core.znedi3.nnedi3, field=field, **nnedi3_args)
-        eedi3 = partial(core.eedi3m.EEDI3, field=field, planes=planes, mdis=EdiMaxD, **eedi3_args)
+
+    eedi3 = partial(core.eedi3m.EEDI3, field=field, planes=planes, mdis=EdiMaxD, **eedi3_args)
 
     if InputType == 1:
         return Input
@@ -1430,7 +1406,7 @@ def QTGMC_Generate2ndFieldNoise(
     random = (
         InterleavedClip.std.SeparateFields(tff=TFF)
         .std.BlankClip(color=[neutral] * Input.format.num_planes)
-        .grain.Add(var=1800, uvar=1800 if ChromaNoise else 0)
+        .noise.Add(var=1800, uvar=1800 if ChromaNoise else 0)
     )
     expr = f"x {neutral} - y * {scale_value(256, 8, bits)} / {neutral} +"
     varRandom = core.std.Expr(
@@ -1466,14 +1442,14 @@ def QTGMC_MakeLossless(
     )
 
     # Clean some of the artefacts caused by the above - creating a second version of the "new" fields
-    vertMedian = processed.rgvs.VerticalCleaner(mode=1)
+    vertMedian = processed.zsmooth.VerticalCleaner(mode=1)
     vertMedDiff = core.std.MakeDiff(processed, vertMedian)
     vmNewDiff1 = vertMedDiff.std.SeparateFields(tff=TFF).std.SelectEvery(cycle=4, offsets=[1, 2])
     vmNewDiff2 = core.std.Expr(
-        [vmNewDiff1.rgvs.VerticalCleaner(mode=1), vmNewDiff1],
+        [vmNewDiff1.zsmooth.VerticalCleaner(mode=1), vmNewDiff1],
         expr=f"x {neutral} - y {neutral} - * 0 < {neutral} x {neutral} - abs y {neutral} - abs < x y ? ?",
     )
-    vmNewDiff3 = core.rgvs.Repair(vmNewDiff2, vmNewDiff2.rgvs.RemoveGrain(mode=2), mode=1)
+    vmNewDiff3 = core.zsmooth.Repair(vmNewDiff2, vmNewDiff2.zsmooth.RemoveGrain(mode=2), mode=1)
 
     # Reweave final result
     return (
@@ -1670,23 +1646,3 @@ def QTGMC_GetUserGlobal(Prefix: str, Name: str) -> Union[vs.VideoNode, None]:
     """Return value of global variable called "Prefix_Name". Returns None if it doesn't exist"""
     global QTGMC_globals
     return QTGMC_globals.get(f"{Prefix}_{Name}")
-
-
-def scdetect(clip: vs.VideoNode, threshold: float = 0.1) -> vs.VideoNode:
-    def _copy_property(n: int, f: list[vs.VideoFrame]) -> vs.VideoFrame:
-        fout = f[0].copy()
-        fout.props["_SceneChangePrev"] = f[1].props["_SceneChangePrev"]
-        fout.props["_SceneChangeNext"] = f[1].props["_SceneChangeNext"]
-        return fout
-
-    assert check_variable(clip, scdetect)
-
-    sc = clip
-    if clip.format.color_family == vs.RGB:
-        sc = clip.resize.Point(format=vs.GRAY8, matrix_s="709")
-
-    sc = sc.misc.SCDetect(threshold)
-    if clip.format.color_family == vs.RGB:
-        sc = clip.std.ModifyFrame([clip, sc], _copy_property)
-
-    return sc

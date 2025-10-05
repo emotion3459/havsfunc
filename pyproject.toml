@@ -23,7 +23,7 @@ classifiers = [
   "Topic :: Multimedia :: Video",
 ]
 dependencies = [
-  "VapourSynth>=66",
+  "VapourSynth>=67",
   "vsjetpack",
 ]
 
