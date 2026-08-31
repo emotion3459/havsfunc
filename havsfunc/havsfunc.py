@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from functools import partial
-from typing import Any, Mapping, Optional, Union
+from typing import Any
 
 from vsdenoise import BM3D, nl_means, prefilter_to_full_range
 from vsexprtools import complexpr_available, norm_expr
@@ -22,8 +23,8 @@ from vstools import (
 )
 
 __all__ = [
-    "mt_clamp",
     "QTGMC",
+    "mt_clamp",
     "scdetect",
 ]
 
@@ -54,41 +55,41 @@ QTGMC_globals = {}
 def QTGMC(
     Input: vs.VideoNode,
     Preset: str = 'Slower',
-    TR0: Optional[int] = None,
-    TR1: Optional[int] = None,
-    TR2: Optional[int] = None,
-    Rep0: Optional[int] = None,
+    TR0: int | None = None,
+    TR1: int | None = None,
+    TR2: int | None = None,
+    Rep0: int | None = None,
     Rep1: int = 0,
-    Rep2: Optional[int] = None,
-    EdiMode: Optional[str] = None,
+    Rep2: int | None = None,
+    EdiMode: str | None = None,
     RepChroma: bool = True,
-    NNSize: Optional[int] = None,
-    NNeurons: Optional[int] = None,
+    NNSize: int | None = None,
+    NNeurons: int | None = None,
     EdiQual: int = 1,
-    EdiMaxD: Optional[int] = None,
+    EdiMaxD: int | None = None,
     ChromaEdi: str = '',
-    EdiExt: Optional[vs.VideoNode] = None,
-    Sharpness: Optional[float] = None,
-    SMode: Optional[int] = None,
-    SLMode: Optional[int] = None,
-    SLRad: Optional[int] = None,
+    EdiExt: vs.VideoNode | None = None,
+    Sharpness: float | None = None,
+    SMode: int | None = None,
+    SLMode: int | None = None,
+    SLRad: int | None = None,
     SOvs: int = 0,
     SVThin: float = 0.0,
-    Sbb: Optional[int] = None,
-    SrchClipPP: Optional[int] = None,
-    SubPel: Optional[int] = None,
+    Sbb: int | None = None,
+    SrchClipPP: int | None = None,
+    SubPel: int | None = None,
     SubPelInterp: int = 2,
-    BlockSize: Optional[int] = None,
-    Overlap: Optional[int] = None,
-    Search: Optional[int] = None,
-    SearchParam: Optional[int] = None,
-    PelSearch: Optional[int] = None,
-    ChromaMotion: Optional[bool] = None,
+    BlockSize: int | None = None,
+    Overlap: int | None = None,
+    Search: int | None = None,
+    SearchParam: int | None = None,
+    PelSearch: int | None = None,
+    ChromaMotion: bool | None = None,
     TrueMotion: bool = False,
-    Lambda: Optional[int] = None,
-    LSAD: Optional[int] = None,
-    PNew: Optional[int] = None,
-    PLevel: Optional[int] = None,
+    Lambda: int | None = None,
+    LSAD: int | None = None,
+    PNew: int | None = None,
+    PLevel: int | None = None,
     GlobalMotion: bool = True,
     DCT: int = 0,
     ThSAD1: int = 640,
@@ -96,37 +97,37 @@ def QTGMC(
     ThSCD1: int = 180,
     ThSCD2: int = 98,
     SourceMatch: int = 0,
-    MatchPreset: Optional[str] = None,
-    MatchEdi: Optional[str] = None,
-    MatchPreset2: Optional[str] = None,
-    MatchEdi2: Optional[str] = None,
+    MatchPreset: str | None = None,
+    MatchEdi: str | None = None,
+    MatchPreset2: str | None = None,
+    MatchEdi2: str | None = None,
     MatchTR2: int = 1,
     MatchEnhance: float = 0.5,
     Lossless: int = 0,
-    NoiseProcess: Optional[int] = None,
-    EZDenoise: Optional[float] = None,
-    EZKeepGrain: Optional[float] = None,
+    NoiseProcess: int | None = None,
+    EZDenoise: float | None = None,
+    EZKeepGrain: float | None = None,
     NoisePreset: str = 'Fast',
-    Denoiser: Optional[str] = None,
+    Denoiser: str | None = None,
     FftThreads: int = 1,
-    DenoiseMC: Optional[bool] = None,
-    NoiseTR: Optional[int] = None,
-    Sigma: Optional[float] = None,
+    DenoiseMC: bool | None = None,
+    NoiseTR: int | None = None,
+    Sigma: float | None = None,
     ChromaNoise: bool = False,
-    ShowNoise: Union[bool, float] = 0.0,
-    GrainRestore: Optional[float] = None,
-    NoiseRestore: Optional[float] = None,
-    NoiseDeint: Optional[str] = None,
-    StabilizeNoise: Optional[bool] = None,
+    ShowNoise: bool | float = 0.0,
+    GrainRestore: float | None = None,
+    NoiseRestore: float | None = None,
+    NoiseDeint: str | None = None,
+    StabilizeNoise: bool | None = None,
     InputType: int = 0,
-    ProgSADMask: Optional[float] = None,
+    ProgSADMask: float | None = None,
     FPSDivisor: int = 1,
     ShutterBlur: int = 0,
     ShutterAngleSrc: float = 180.0,
     ShutterAngleOut: float = 180.0,
     SBlurLimit: int = 4,
     Border: bool = False,
-    Precise: Optional[bool] = None,
+    Precise: bool | None = None,
     Tuning: str = 'None',
     ShowSettings: bool = False,
     GlobalNames: str = 'QTGMC',
@@ -137,11 +138,11 @@ def QTGMC(
     FastMA: bool = False,
     ESearchP: bool = False,
     RefineMotion: bool = False,
-    TFF: Optional[bool] = None,
+    TFF: bool | None = None,
     nnedi3_args: Mapping[str, Any] = {},
     eedi3_args: Mapping[str, Any] = {},
     opencl: bool = False,
-    device: Optional[int] = None,
+    device: int | None = None,
 ) -> vs.VideoNode:
     '''
     QTGMC 3.33
@@ -726,33 +727,33 @@ def QTGMC(
         if bits > 8 and FastMA:
             srchClip = depth(srchClip, 8, dither_type=DitherType.NONE)
 
-    super_args = dict(pel=SubPel, hpad=hpad, vpad=vpad)
-    analyse_args = dict(
-        blksize=BlockSize,
-        overlap=Overlap,
-        search=Search,
-        searchparam=SearchParam,
-        pelsearch=PelSearch,
-        truemotion=TrueMotion,
-        lambda_=Lambda,
-        lsad=LSAD,
-        pnew=PNew,
-        plevel=PLevel,
-        global_=GlobalMotion,
-        dct=DCT,
-        chroma=ChromaMotion,
-    )
-    recalculate_args = dict(
-        thsad=ThSAD1 // 2,
-        blksize=max(BlockSize // 2, 4),
-        search=Search,
-        searchparam=SearchParam,
-        chroma=ChromaMotion,
-        truemotion=TrueMotion,
-        pnew=PNew,
-        overlap=max(Overlap // 2, 2),
-        dct=DCT,
-    )
+    super_args = {"pel": SubPel, "hpad": hpad, "vpad": vpad}
+    analyse_args = {
+        "blksize": BlockSize,
+        "overlap": Overlap,
+        "search": Search,
+        "searchparam": SearchParam,
+        "pelsearch": PelSearch,
+        "truemotion": TrueMotion,
+        "lambda_": Lambda,
+        "lsad": LSAD,
+        "pnew": PNew,
+        "plevel": PLevel,
+        "global_": GlobalMotion,
+        "dct": DCT,
+        "chroma": ChromaMotion,
+    }
+    recalculate_args = {
+        "thsad": ThSAD1 // 2,
+        "blksize": max(BlockSize // 2, 4),
+        "search": Search,
+        "searchparam": SearchParam,
+        "chroma": ChromaMotion,
+        "truemotion": TrueMotion,
+        "pnew": PNew,
+        "overlap": max(Overlap // 2, 2),
+        "dct": DCT,
+    }
 
     # Calculate forward and backward motion vectors from motion search clip
     if maxTR > 0:
@@ -1122,18 +1123,18 @@ def QTGMC(
     rBlockDivide = BlockSize // rBlockSize
     rLambda = Lambda // (rBlockDivide * rBlockDivide)
     if ShutterBlur > 1:
-        recalculate_args = dict(
-            thsad=ThSAD1,
-            blksize=rBlockSize,
-            overlap=rOverlap,
-            search=Search,
-            searchparam=SearchParam,
-            truemotion=TrueMotion,
-            lambda_=rLambda,
-            pnew=PNew,
-            dct=DCT,
-            chroma=ChromaMotion,
-        )
+        recalculate_args = {
+            "thsad": ThSAD1,
+            "blksize": rBlockSize,
+            "overlap": rOverlap,
+            "search": Search,
+            "searchparam": SearchParam,
+            "truemotion": TrueMotion,
+            "lambda_": rLambda,
+            "pnew": PNew,
+            "dct": DCT,
+            "chroma": ChromaMotion,
+        }
         sbBVec1 = core.mv.Recalculate(srchSuper, bVec1, **recalculate_args)
         sbFVec1 = core.mv.Recalculate(srchSuper, fVec1, **recalculate_args)
     elif ShutterBlur > 0:
@@ -1198,13 +1199,13 @@ def QTGMC_Interpolate(
     NNeurons: int,
     EdiQual: int,
     EdiMaxD: int,
-    Fallback: Optional[vs.VideoNode] = None,
+    Fallback: vs.VideoNode | None = None,
     ChromaEdi: str = '',
-    TFF: Optional[bool] = None,
+    TFF: bool | None = None,
     nnedi3_args: Mapping[str, Any] = {},
     eedi3_args: Mapping[str, Any] = {},
     opencl: bool = False,
-    device: Optional[int] = None,
+    device: int | None = None,
 ) -> vs.VideoNode:
     '''
     Interpolate input clip using method given in EdiMode. Use Fallback or Bob as result if mode not in list. If ChromaEdi string if set then interpolate chroma
@@ -1327,7 +1328,7 @@ def QTGMC_KeepOnlyBobShimmerFixes(Input: vs.VideoNode, Ref: vs.VideoNode, Rep: i
     return core.std.MergeDiff(Input, restore, planes=planes)
 
 
-def QTGMC_Generate2ndFieldNoise(Input: vs.VideoNode, InterleavedClip: vs.VideoNode, ChromaNoise: bool = False, TFF: Optional[bool] = None) -> vs.VideoNode:
+def QTGMC_Generate2ndFieldNoise(Input: vs.VideoNode, InterleavedClip: vs.VideoNode, ChromaNoise: bool = False, TFF: bool | None = None) -> vs.VideoNode:
     '''
     Given noise extracted from an interlaced source (i.e. the noise is interlaced), generate "progressive" noise with a new "field" of noise injected. The new
     noise is centered on a weighted local average and uses the difference between local min & max as an estimate of local variance
@@ -1352,7 +1353,7 @@ def QTGMC_Generate2ndFieldNoise(Input: vs.VideoNode, InterleavedClip: vs.VideoNo
     return core.std.Interleave([origNoise, newNoise]).std.DoubleWeave(TFF)[::2]
 
 
-def QTGMC_MakeLossless(Input: vs.VideoNode, Source: vs.VideoNode, InputType: int, TFF: Optional[bool] = None) -> vs.VideoNode:
+def QTGMC_MakeLossless(Input: vs.VideoNode, Source: vs.VideoNode, InputType: int, TFF: bool | None = None) -> vs.VideoNode:
     '''
     Insert the source lines into the result to create a true lossless output. However, the other lines in the result have had considerable processing and won't
     exactly match source lines. There will be some slight residual combing. Use vertical medians to clean a little of this away
@@ -1387,10 +1388,10 @@ def QTGMC_ApplySourceMatch(
     Deinterlace: vs.VideoNode,
     InputType: int,
     Source: vs.VideoNode,
-    bVec1: Union[vs.VideoNode, None],
-    fVec1: Union[vs.VideoNode, None],
-    bVec2: Union[vs.VideoNode, None],
-    fVec2: Union[vs.VideoNode, None],
+    bVec1: vs.VideoNode | None,
+    fVec1: vs.VideoNode | None,
+    bVec2: vs.VideoNode | None,
+    fVec2: vs.VideoNode | None,
     SubPel: int,
     SubPelInterp: int,
     hpad: int,
@@ -1412,11 +1413,11 @@ def QTGMC_ApplySourceMatch(
     MatchEdiQual2: int,
     MatchEdiMaxD2: int,
     MatchEnhance: float,
-    TFF: Optional[bool] = None,
+    TFF: bool | None = None,
     nnedi3_args: Mapping[str, Any] = {},
     eedi3_args: Mapping[str, Any] = {},
     opencl: bool = False,
-    device: Optional[int] = None,
+    device: int | None = None,
 ) -> vs.VideoNode:
     '''
     Source-match, a three stage process that takes the difference between deinterlaced input and the original interlaced source, to shift the input more towards
@@ -1542,15 +1543,13 @@ def QTGMC_ApplySourceMatch(
     return core.std.MergeDiff(match1Shp, match3)
 
 
-def QTGMC_SetUserGlobal(Prefix: str, Name: str, Value: Union[vs.VideoNode, None]) -> None:
+def QTGMC_SetUserGlobal(Prefix: str, Name: str, Value: vs.VideoNode | None) -> None:
     '''Set global variable called "Prefix_Name" to "Value".'''
-    global QTGMC_globals
     QTGMC_globals[f'{Prefix}_{Name}'] = Value
 
 
-def QTGMC_GetUserGlobal(Prefix: str, Name: str) -> Union[vs.VideoNode, None]:
+def QTGMC_GetUserGlobal(Prefix: str, Name: str) -> vs.VideoNode | None:
     '''Return value of global variable called "Prefix_Name". Returns None if it doesn't exist'''
-    global QTGMC_globals
     return QTGMC_globals.get(f'{Prefix}_{Name}')
 
 
