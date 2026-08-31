@@ -5,8 +5,8 @@ from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
-from vsdenoise import BM3D, nl_means, prefilter_to_full_range
-from vsexprtools import complexpr_available, norm_expr
+from vsdenoise import bm3d, nl_means, prefilter_to_full_range
+from vsexprtools import norm_expr
 from vsrgtools import gauss_blur
 from vstools import (
     DitherType,
@@ -42,11 +42,9 @@ def mt_clamp(
     check_ref_clip(clip, dark, mt_clamp)
     planes = normalize_planes(clip, planes)
 
-    if complexpr_available:
-        expr = f"x z {undershoot} - y {overshoot} + clamp"
-    else:
-        expr = f"x z {undershoot} - max y {overshoot} + min"
-    return norm_expr([clip, bright, dark], expr, planes)
+    return norm_expr(
+        [clip, bright, dark], f"x z {undershoot} - y {overshoot} + clamp", planes
+    )
 
 
 QTGMC_globals = {}
@@ -926,7 +924,7 @@ def QTGMC(
                 ]
             )
         if Denoiser == "bm3d":
-            dnWindow = BM3D.denoise(noiseWindow, Sigma, NoiseTR, planes=CNplanes)
+            dnWindow = bm3d(noiseWindow, Sigma, NoiseTR, planes=CNplanes)
         elif Denoiser == "dfttest":
             dnWindow = noiseWindow.dfttest.DFTTest(
                 sigma=Sigma * 4, tbsize=noiseTD, planes=CNplanes
