@@ -5,28 +5,24 @@ from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
-from vsdenoise import bm3d, nl_means, prefilter_to_full_range
+from vsdenoise import DFTTest, bm3d, nl_means, prefilter_to_full_range
 from vsexprtools import norm_expr
 from vsrgtools import gauss_blur
 from vstools import (
     DitherType,
     PlanesT,
     check_ref_clip,
-    check_variable,
     core,
     depth,
     fallback,
     get_depth,
     normalize_planes,
+    sc_detect,
     scale_value,
     vs,
 )
 
-__all__ = [
-    "QTGMC",
-    "mt_clamp",
-    "scdetect",
-]
+__all__ = ["QTGMC", "mt_clamp"]
 
 
 def mt_clamp(
@@ -89,7 +85,7 @@ def QTGMC(
     PNew: int | None = None,
     PLevel: int | None = None,
     GlobalMotion: bool = True,
-    DCT: int = 0,
+    DCT: bool = False,
     ThSAD1: int = 640,
     ThSAD2: int = 256,
     ThSCD1: int = 180,
@@ -139,8 +135,7 @@ def QTGMC(
     TFF: bool | None = None,
     nnedi3_args: Mapping[str, Any] = {},
     eedi3_args: Mapping[str, Any] = {},
-    opencl: bool = False,
-    device: int | None = None,
+    vulkan: bool = False,
 ) -> vs.VideoNode:
     """
     QTGMC 3.33
@@ -389,9 +384,7 @@ def QTGMC(
 
         eedi3_args: Additional arguments to pass to EEDI3.
 
-        opencl: Whether to use the OpenCL version of NNEDI3 and EEDI3.
-
-        device: Sets target OpenCL device.
+        vulkan: Whether to use the vulkan version of NNEDI3 and EEDI3.
     """
     if not isinstance(Input, vs.VideoNode):
         raise vs.Error("QTGMC: this is not a clip")
@@ -495,14 +488,14 @@ def QTGMC(
     BlockSize = fallback(BlockSize,       [ bs,       bs,       bs,       bs,       bs,       bs,       bs2,      bs2,      bs2,      bs2,      bs2    ][pNum])
     bs = BlockSize
     Overlap = fallback(Overlap,           [ bs // 2,  bs // 2,  bs // 2,  bs // 2,  bs // 2,  bs // 2,  bs // 2,  bs // 4,  bs // 4,  bs // 4,  bs // 4][pNum])
-    Search = fallback(Search,             [ 5,        4,        4,        4,        4,        4,        4,        4,        0,        0,        0      ][pNum])
+    Search = fallback(Search,             [ 3,        2,        2,        2,        2,        2,        2,        2,        0,        0,        0      ][pNum])
     SearchParam = fallback(SearchParam,   [ 2,        2,        2,        2,        2,        2,        2,        1,        1,        1,        1      ][pNum])
     PelSearch = fallback(PelSearch,       [ 2,        2,        2,        2,        1,        1,        1,        1,        1,        1,        1      ][pNum])
     ChromaMotion = fallback(ChromaMotion, [ True,     True,     True,     False,    False,    False,    False,    False,    False,    False,    False  ][pNum])
     Precise = fallback(Precise,           [ True,     True,     False,    False,    False,    False,    False,    False,    False,    False,    False  ][pNum])
     ProgSADMask = fallback(ProgSADMask,   [ 10.0,     10.0,     10.0,     10.0,     10.0,     0.0,      0.0,      0.0,      0.0,      0.0,      0.0    ][pNum])
 
-    if ESearchP and Search in [4, 5]:
+    if ESearchP and Search in [2, 3]:
         if pNum < 4:
             SearchParam = 24
         elif pNum < 8:
@@ -644,9 +637,7 @@ def QTGMC(
     )
 
     # MVTools settings
-    Lambda = fallback(
-        Lambda, (1000 if TrueMotion else 100) * BlockSize * BlockSize // 64
-    )
+    Lambda = fallback(Lambda, 1000 if TrueMotion else 100)
     LSAD = fallback(LSAD, 1200 if TrueMotion else 400)
     PNew = fallback(PNew, 50 if TrueMotion else 25)
     PLevel = fallback(PLevel, 1 if TrueMotion else 0)
@@ -723,13 +714,13 @@ def QTGMC(
     # These kernels are approximately Gaussian kernels, which work well as a prefilter before motion analysis (hence the original name for this script)
     # Create linear weightings of neighbors first
     if not isinstance(srchClip, vs.VideoNode):
-        bobbed = scdetect(bobbed, 28 / 255)
+        bobbed = sc_detect(bobbed, 28 / 255)
         if TR0 > 0:  # -2    -1    0     1     2
-            ts1 = bobbed.misc.AverageFrames(
+            ts1 = bobbed.std.AverageFrames(
                 [1] * 3, scenechange=True, planes=CMplanes
             )  # 0.00  0.33  0.33  0.33  0.00
         if TR0 > 1:
-            ts2 = bobbed.misc.AverageFrames(
+            ts2 = bobbed.std.AverageFrames(
                 [1] * 5, scenechange=True, planes=CMplanes
             )  # 0.20  0.20  0.20  0.20  0.20
 
@@ -797,24 +788,29 @@ def QTGMC(
                 [spatialBlur, tweaked],
                 expr=expr if ChromaMotion or is_gray else [expr, ""],
             )
-        srchClip = prefilter_to_full_range(srchClip, slope=Str)
+        srchClip = prefilter_to_full_range(srchClip, slope=Str, smooth=Amp)
         if bits > 8 and FastMA:
             srchClip = depth(srchClip, 8, dither_type=DitherType.NONE)
 
-    super_args = {"pel": SubPel, "hpad": hpad, "vpad": vpad}
+    super_args = {
+        "pel": SubPel,
+        "sharp": SubPelInterp,
+        "blksize": BlockSize,
+        "overlap": Overlap,
+        "pad": [hpad, vpad],
+    }
     analyse_args = {
         "blksize": BlockSize,
         "overlap": Overlap,
         "search": Search,
         "searchparam": SearchParam,
         "pelsearch": PelSearch,
-        "truemotion": TrueMotion,
-        "lambda_": Lambda,
+        "mvlambda": Lambda,
         "lsad": LSAD,
         "pnew": PNew,
         "plevel": PLevel,
-        "global_": GlobalMotion,
-        "dct": DCT,
+        "globalmv": GlobalMotion,
+        "satd": DCT,
         "chroma": ChromaMotion,
     }
     recalculate_args = {
@@ -822,45 +818,43 @@ def QTGMC(
         "blksize": max(BlockSize // 2, 4),
         "search": Search,
         "searchparam": SearchParam,
+        "mvlambda": Lambda,
         "chroma": ChromaMotion,
-        "truemotion": TrueMotion,
         "pnew": PNew,
         "overlap": max(Overlap // 2, 2),
-        "dct": DCT,
+        "satd": DCT,
     }
 
     # Calculate forward and backward motion vectors from motion search clip
     if maxTR > 0:
         if not isinstance(srchSuper, vs.VideoNode):
-            srchSuper = srchClip.mv.Super(
-                sharp=SubPelInterp, chroma=ChromaMotion, **super_args
-            )
+            srchSuper = srchClip.mvu.Super(**super_args)
         if not isinstance(bVec1, vs.VideoNode):
-            bVec1 = srchSuper.mv.Analyse(isb=True, delta=1, **analyse_args)
+            bVec1 = srchSuper.mvu.Analyse(delta=-1, **analyse_args)
             if RefineMotion:
-                bVec1 = core.mv.Recalculate(srchSuper, bVec1, **recalculate_args)
+                bVec1 = core.mvu.Recalculate(srchSuper, bVec1, **recalculate_args)
         if not isinstance(fVec1, vs.VideoNode):
-            fVec1 = srchSuper.mv.Analyse(isb=False, delta=1, **analyse_args)
+            fVec1 = srchSuper.mvu.Analyse(delta=1, **analyse_args)
             if RefineMotion:
-                fVec1 = core.mv.Recalculate(srchSuper, fVec1, **recalculate_args)
+                fVec1 = core.mvu.Recalculate(srchSuper, fVec1, **recalculate_args)
     if maxTR > 1:
         if not isinstance(bVec2, vs.VideoNode):
-            bVec2 = srchSuper.mv.Analyse(isb=True, delta=2, **analyse_args)
+            bVec2 = srchSuper.mvu.Analyse(delta=-2, **analyse_args)
             if RefineMotion:
-                bVec2 = core.mv.Recalculate(srchSuper, bVec2, **recalculate_args)
+                bVec2 = core.mvu.Recalculate(srchSuper, bVec2, **recalculate_args)
         if not isinstance(fVec2, vs.VideoNode):
-            fVec2 = srchSuper.mv.Analyse(isb=False, delta=2, **analyse_args)
+            fVec2 = srchSuper.mvu.Analyse(delta=2, **analyse_args)
             if RefineMotion:
-                fVec2 = core.mv.Recalculate(srchSuper, fVec2, **recalculate_args)
+                fVec2 = core.mvu.Recalculate(srchSuper, fVec2, **recalculate_args)
     if maxTR > 2:
         if not isinstance(bVec3, vs.VideoNode):
-            bVec3 = srchSuper.mv.Analyse(isb=True, delta=3, **analyse_args)
+            bVec3 = srchSuper.mvu.Analyse(delta=-3, **analyse_args)
             if RefineMotion:
-                bVec3 = core.mv.Recalculate(srchSuper, bVec3, **recalculate_args)
+                bVec3 = core.mvu.Recalculate(srchSuper, bVec3, **recalculate_args)
         if not isinstance(fVec3, vs.VideoNode):
-            fVec3 = srchSuper.mv.Analyse(isb=False, delta=3, **analyse_args)
+            fVec3 = srchSuper.mvu.Analyse(delta=3, **analyse_args)
             if RefineMotion:
-                fVec3 = core.mv.Recalculate(srchSuper, fVec3, **recalculate_args)
+                fVec3 = core.mvu.Recalculate(srchSuper, fVec3, **recalculate_args)
 
     # Expose search clip, motion search super clip and motion vectors to calling script through globals
     if ReplaceGlobals:
@@ -883,9 +877,7 @@ def QTGMC(
         else:
             fullClip = clip.resize.Bob(tff=TFF, filter_param_a=0, filter_param_b=1)
     if NoiseTR > 0:
-        fullSuper = fullClip.mv.Super(
-            levels=1, chroma=ChromaNoise, **super_args
-        )  # TEST chroma OK?
+        fullSuper = fullClip.mvu.Super(onelevel=True, **super_args)  # TEST chroma OK?
 
     CNplanes = [0, 1, 2] if ChromaNoise and not is_gray else [0]
 
@@ -896,11 +888,11 @@ def QTGMC(
         elif NoiseTR == 1:
             noiseWindow = core.std.Interleave(
                 [
-                    core.mv.Compensate(
+                    core.mvu.Compensate(
                         fullClip, fullSuper, fVec1, thscd1=ThSCD1, thscd2=ThSCD2
                     ),
                     fullClip,
-                    core.mv.Compensate(
+                    core.mvu.Compensate(
                         fullClip, fullSuper, bVec1, thscd1=ThSCD1, thscd2=ThSCD2
                     ),
                 ]
@@ -908,17 +900,17 @@ def QTGMC(
         else:
             noiseWindow = core.std.Interleave(
                 [
-                    core.mv.Compensate(
+                    core.mvu.Compensate(
                         fullClip, fullSuper, fVec2, thscd1=ThSCD1, thscd2=ThSCD2
                     ),
-                    core.mv.Compensate(
+                    core.mvu.Compensate(
                         fullClip, fullSuper, fVec1, thscd1=ThSCD1, thscd2=ThSCD2
                     ),
                     fullClip,
-                    core.mv.Compensate(
+                    core.mvu.Compensate(
                         fullClip, fullSuper, bVec1, thscd1=ThSCD1, thscd2=ThSCD2
                     ),
-                    core.mv.Compensate(
+                    core.mvu.Compensate(
                         fullClip, fullSuper, bVec2, thscd1=ThSCD1, thscd2=ThSCD2
                     ),
                 ]
@@ -926,8 +918,8 @@ def QTGMC(
         if Denoiser == "bm3d":
             dnWindow = bm3d(noiseWindow, Sigma, NoiseTR, planes=CNplanes)
         elif Denoiser == "dfttest":
-            dnWindow = noiseWindow.dfttest.DFTTest(
-                sigma=Sigma * 4, tbsize=noiseTD, planes=CNplanes
+            dnWindow = DFTTest(sigma=Sigma * 4).denoise(
+                noiseWindow, tr=NoiseTR, planes=CNplanes
             )
         elif Denoiser in ["knlm", "knlmeanscl"]:
             dnWindow = nl_means(
@@ -981,10 +973,8 @@ def QTGMC(
 
             # Motion-compensated stabilization of generated noise
             if StabilizeNoise:
-                noiseSuper = deintNoise.mv.Super(
-                    sharp=SubPelInterp, levels=1, chroma=ChromaNoise, **super_args
-                )
-                mcNoise = core.mv.Compensate(
+                noiseSuper = deintNoise.mvu.Super(onelevel=True, **super_args)
+                mcNoise = core.mvu.Compensate(
                     deintNoise, noiseSuper, bVec1, thscd1=ThSCD1, thscd2=ThSCD2
                 )
                 expr = (
@@ -1030,8 +1020,7 @@ def QTGMC(
             TFF,
             nnedi3_args,
             eedi3_args,
-            opencl,
-            device,
+            vulkan,
         )
 
     # InputType=2,3: use motion mask to blend luma between original clip & reweaved clip based on ProgSADMask setting. Use chroma from original clip in any case
@@ -1047,23 +1036,15 @@ def QTGMC(
         else:
             edi = edi1
     else:
-        inputTypeBlend = core.mv.Mask(
-            depth(srchClip, 8, dither_type=DitherType.NONE),
-            bVec1,
-            kind=1,
-            ml=ProgSADMask,
-        )
-        inputTypeBlend = depth(
-            inputTypeBlend, srchClip.format.bits_per_sample, dither_type=DitherType.NONE
-        )
+        inputTypeBlend = core.mvu.SADMask(srchClip, bVec1, ml=ProgSADMask)
         edi = core.std.MaskedMerge(innerClip, edi1, inputTypeBlend, planes=0)
 
     # Get the max/min value for each pixel over neighboring motion-compensated frames - used for temporal sharpness limiting
     if TR1 > 0 or temporalSL:
-        ediSuper = edi.mv.Super(sharp=SubPelInterp, levels=1, **super_args)
+        ediSuper = edi.mvu.Super(onelevel=True, **super_args)
     if temporalSL:
-        bComp1 = core.mv.Compensate(edi, ediSuper, bVec1, thscd1=ThSCD1, thscd2=ThSCD2)
-        fComp1 = core.mv.Compensate(edi, ediSuper, fVec1, thscd1=ThSCD1, thscd2=ThSCD2)
+        bComp1 = core.mvu.Compensate(edi, ediSuper, bVec1, thscd1=ThSCD1, thscd2=ThSCD2)
+        fComp1 = core.mvu.Compensate(edi, ediSuper, fVec1, thscd1=ThSCD1, thscd2=ThSCD2)
         tMax = core.std.Expr(
             [core.std.Expr([edi, fComp1], expr="x y max"), bComp1], expr="x y max"
         )
@@ -1071,10 +1052,10 @@ def QTGMC(
             [core.std.Expr([edi, fComp1], expr="x y min"), bComp1], expr="x y min"
         )
         if SLRad > 1:
-            bComp3 = core.mv.Compensate(
+            bComp3 = core.mvu.Compensate(
                 edi, ediSuper, bVec3, thscd1=ThSCD1, thscd2=ThSCD2
             )
-            fComp3 = core.mv.Compensate(
+            fComp3 = core.mvu.Compensate(
                 edi, ediSuper, fVec3, thscd1=ThSCD1, thscd2=ThSCD2
             )
             tMax = core.std.Expr(
@@ -1092,12 +1073,12 @@ def QTGMC(
     # MDegrain1 (motion compensated) rather than TemporalSmooth makes the weightings *look* different, but they evaluate to the same values
     # Create linear weightings of neighbors first                                                               -2    -1    0     1     2
     if TR1 > 0:
-        degrain1 = core.mv.Degrain1(
-            edi, ediSuper, bVec1, fVec1, thsad=ThSAD1, thscd1=ThSCD1, thscd2=ThSCD2
+        degrain1 = core.mvu.Degrain1(
+            edi, ediSuper, [bVec1, fVec1], thsad=ThSAD1, thscd1=ThSCD1, thscd2=ThSCD2
         )  # 0.00  0.33  0.33  0.33  0.00
     if TR1 > 1:
-        degrain2 = core.mv.Degrain1(
-            edi, ediSuper, bVec2, fVec2, thsad=ThSAD1, thscd1=ThSCD1, thscd2=ThSCD2
+        degrain2 = core.mvu.Degrain1(
+            edi, ediSuper, [bVec2, fVec2], thsad=ThSAD1, thscd1=ThSCD1, thscd2=ThSCD2
         )  # 0.33  0.00  0.33  0.00  0.33
 
     # Combine linear weightings to give binomial weightings - TR1=0: (1), TR1=1: (1:2:1), TR1=2: (1:4:6:4:1)
@@ -1128,10 +1109,7 @@ def QTGMC(
             fVec1 if maxTR > 0 else None,
             bVec2 if maxTR > 1 else None,
             fVec2 if maxTR > 1 else None,
-            SubPel,
-            SubPelInterp,
-            hpad,
-            vpad,
+            super_args,
             ThSAD1,
             ThSCD1,
             ThSCD2,
@@ -1152,8 +1130,7 @@ def QTGMC(
             TFF,
             nnedi3_args,
             eedi3_args,
-            opencl,
-            device,
+            vulkan,
         )
 
     # Lossless=2 - after preparing an interpolated, de-shimmered clip, restore the original source fields into it and clean up any artefacts
@@ -1199,7 +1176,7 @@ def QTGMC(
     if SVThin > 0:
         expr = f"y x - {SVThinSc} * {neutral} +"
         vertMedD = core.std.Expr(
-            [lossed1, lossed1.rgvs.VerticalCleaner(mode=1 if is_gray else [1, 0])],
+            [lossed1, lossed1.zsmooth.VerticalCleaner(mode=1 if is_gray else [1, 0])],
             expr=expr if is_gray else [expr, ""],
         )
         vertMedD = vertMedD.std.Convolution(matrix=[1, 2, 1], planes=0, mode="h")
@@ -1231,10 +1208,10 @@ def QTGMC(
     # Occurs here (before final temporal smooth) if SLMode == 1,2. This location will restrict sharpness more, but any artefacts introduced will be smoothed
     if SLMode == 1:
         if SLRad <= 1:
-            sharpLimit1 = core.rgvs.Repair(backBlend1, edi, mode=1)
+            sharpLimit1 = core.zsmooth.Repair(backBlend1, edi, mode=1)
         else:
-            sharpLimit1 = core.rgvs.Repair(
-                backBlend1, core.rgvs.Repair(backBlend1, edi, mode=12), mode=1
+            sharpLimit1 = core.zsmooth.Repair(
+                backBlend1, core.zsmooth.Repair(backBlend1, edi, mode=12), mode=1
             )
     elif SLMode == 2:
         sharpLimit1 = mt_clamp(backBlend1, tMax, tMin, SOvs, SOvs)
@@ -1270,41 +1247,32 @@ def QTGMC(
 
     # Final light linear temporal smooth for denoising
     if TR2 > 0:
-        stableSuper = addNoise1.mv.Super(sharp=SubPelInterp, levels=1, **super_args)
+        stableSuper = addNoise1.mvu.Super(onelevel=True, **super_args)
     if TR2 <= 0:
         stable = addNoise1
     elif TR2 == 1:
-        stable = core.mv.Degrain1(
+        stable = core.mvu.Degrain1(
             addNoise1,
             stableSuper,
-            bVec1,
-            fVec1,
+            [bVec1, fVec1],
             thsad=ThSAD2,
             thscd1=ThSCD1,
             thscd2=ThSCD2,
         )
     elif TR2 == 2:
-        stable = core.mv.Degrain2(
+        stable = core.mvu.Degrain2(
             addNoise1,
             stableSuper,
-            bVec1,
-            fVec1,
-            bVec2,
-            fVec2,
+            [bVec1, fVec1, bVec2, fVec2],
             thsad=ThSAD2,
             thscd1=ThSCD1,
             thscd2=ThSCD2,
         )
     else:
-        stable = core.mv.Degrain3(
+        stable = core.mvu.Degrain3(
             addNoise1,
             stableSuper,
-            bVec1,
-            fVec1,
-            bVec2,
-            fVec2,
-            bVec3,
-            fVec3,
+            [bVec1, fVec1, bVec2, fVec2, bVec3, fVec3],
             thsad=ThSAD2,
             thscd1=ThSCD1,
             thscd2=ThSCD2,
@@ -1320,10 +1288,10 @@ def QTGMC(
     # Occurs here (after final temporal smooth) if SLMode == 3,4. Allows more sharpening here, but more prone to introducing minor artefacts
     if SLMode == 3:
         if SLRad <= 1:
-            sharpLimit2 = core.rgvs.Repair(repair2, edi, mode=1)
+            sharpLimit2 = core.zsmooth.Repair(repair2, edi, mode=1)
         else:
-            sharpLimit2 = core.rgvs.Repair(
-                repair2, core.rgvs.Repair(repair2, edi, mode=12), mode=1
+            sharpLimit2 = core.zsmooth.Repair(
+                repair2, core.zsmooth.Repair(repair2, edi, mode=12), mode=1
             )
     elif SLMode >= 4:
         sharpLimit2 = mt_clamp(repair2, tMax, tMin, SOvs, SOvs)
@@ -1368,7 +1336,6 @@ def QTGMC(
     rBlockSize = max(BlockSize // rBlockDivide, 4)
     rOverlap = max(Overlap // rBlockDivide, 2)
     rBlockDivide = BlockSize // rBlockSize
-    rLambda = Lambda // (rBlockDivide * rBlockDivide)
     if ShutterBlur > 1:
         recalculate_args = {
             "thsad": ThSAD1,
@@ -1376,22 +1343,21 @@ def QTGMC(
             "overlap": rOverlap,
             "search": Search,
             "searchparam": SearchParam,
-            "truemotion": TrueMotion,
-            "lambda_": rLambda,
+            "mvlambda": Lambda,
             "pnew": PNew,
-            "dct": DCT,
+            "satd": DCT,
             "chroma": ChromaMotion,
         }
-        sbBVec1 = core.mv.Recalculate(srchSuper, bVec1, **recalculate_args)
-        sbFVec1 = core.mv.Recalculate(srchSuper, fVec1, **recalculate_args)
+        sbBVec1 = core.mvu.Recalculate(srchSuper, bVec1, **recalculate_args)
+        sbFVec1 = core.mvu.Recalculate(srchSuper, fVec1, **recalculate_args)
     elif ShutterBlur > 0:
         sbBVec1 = bVec1
         sbFVec1 = fVec1
 
     # Shutter motion blur - use MFlowBlur to blur along motion vectors
     if ShutterBlur > 0:
-        sblurSuper = addNoise2.mv.Super(sharp=SubPelInterp, levels=1, **super_args)
-        sblur = core.mv.FlowBlur(
+        sblurSuper = addNoise2.mvu.Super(onelevel=True, **super_args)
+        sblur = core.mvu.FlowBlur(
             addNoise2,
             sblurSuper,
             sbBVec1,
@@ -1407,15 +1373,7 @@ def QTGMC(
     elif SBlurLimit <= 0:
         sblurred = sblur
     else:
-        sbMotionMask = core.mv.Mask(
-            depth(srchClip, 8, dither_type=DitherType.NONE),
-            bVec1,
-            kind=0,
-            ml=SBlurLimit,
-        )
-        sbMotionMask = depth(
-            sbMotionMask, srchClip.format.bits_per_sample, dither_type=DitherType.NONE
-        )
+        sbMotionMask = core.mvu.VectorLengthMask(srchClip, bVec1, ml=SBlurLimit)
         sblurred = core.std.MaskedMerge(addNoise2, sblur, sbMotionMask)
 
     # Reduce frame rate
@@ -1468,8 +1426,7 @@ def QTGMC_Interpolate(
     TFF: bool | None = None,
     nnedi3_args: Mapping[str, Any] = {},
     eedi3_args: Mapping[str, Any] = {},
-    opencl: bool = False,
-    device: int | None = None,
+    vulkan: bool = False,
 ) -> vs.VideoNode:
     """
     Interpolate input clip using method given in EdiMode. Use Fallback or Bob as result if mode not in list. If ChromaEdi string if set then interpolate chroma
@@ -1482,22 +1439,19 @@ def QTGMC_Interpolate(
 
     field = 3 if TFF else 2
 
-    if opencl:
-        nnedi3 = partial(
-            core.nnedi3cl.NNEDI3CL, field=field, device=device, **nnedi3_args
-        )
+    if vulkan:
+        nnedi3 = partial(core.nnedi3vk.NNEDI3, field=field, **nnedi3_args)
         eedi3 = partial(
-            core.eedi3m.EEDI3CL,
+            core.eedi3vk2.EEDI3,
             field=field,
             planes=planes,
             mdis=EdiMaxD,
-            device=device,
             **eedi3_args,
         )
     else:
         nnedi3 = partial(core.znedi3.nnedi3, field=field, **nnedi3_args)
         eedi3 = partial(
-            core.eedi3m.EEDI3, field=field, planes=planes, mdis=EdiMaxD, **eedi3_args
+            core.vszip.EEDI3, field=field, planes=planes, mdis=EdiMaxD, **eedi3_args
         )
 
     if InputType == 1:
@@ -1646,7 +1600,7 @@ def QTGMC_Generate2ndFieldNoise(
     random = (
         InterleavedClip.std.SeparateFields(tff=TFF)
         .std.BlankClip(color=[neutral] * Input.format.num_planes)
-        .grain.Add(var=1800, uvar=1800 if ChromaNoise else 0)
+        .noise.Add(var=1800, uvar=1800 if ChromaNoise else 0)
     )
     expr = f"x {neutral} - y * {scale_value(256, 8, bits)} / {neutral} +"
     varRandom = core.std.Expr(
@@ -1686,17 +1640,17 @@ def QTGMC_MakeLossless(
     )
 
     # Clean some of the artefacts caused by the above - creating a second version of the "new" fields
-    vertMedian = processed.rgvs.VerticalCleaner(mode=1)
+    vertMedian = processed.zsmooth.VerticalCleaner(mode=1)
     vertMedDiff = core.std.MakeDiff(processed, vertMedian)
     vmNewDiff1 = vertMedDiff.std.SeparateFields(tff=TFF).std.SelectEvery(
         cycle=4, offsets=[1, 2]
     )
     vmNewDiff2 = core.std.Expr(
-        [vmNewDiff1.rgvs.VerticalCleaner(mode=1), vmNewDiff1],
+        [vmNewDiff1.zsmooth.VerticalCleaner(mode=1), vmNewDiff1],
         expr=f"x {neutral} - y {neutral} - * 0 < {neutral} x {neutral} - abs y {neutral} - abs < x y ? ?",
     )
-    vmNewDiff3 = core.rgvs.Repair(
-        vmNewDiff2, vmNewDiff2.rgvs.RemoveGrain(mode=2), mode=1
+    vmNewDiff3 = core.zsmooth.Repair(
+        vmNewDiff2, vmNewDiff2.zsmooth.RemoveGrain(mode=2), mode=1
     )
 
     # Reweave final result
@@ -1715,10 +1669,7 @@ def QTGMC_ApplySourceMatch(
     fVec1: vs.VideoNode | None,
     bVec2: vs.VideoNode | None,
     fVec2: vs.VideoNode | None,
-    SubPel: int,
-    SubPelInterp: int,
-    hpad: int,
-    vpad: int,
+    super_args: Mapping[str, Any],
     ThSAD1: int,
     ThSCD1: int,
     ThSCD2: int,
@@ -1739,8 +1690,7 @@ def QTGMC_ApplySourceMatch(
     TFF: bool | None = None,
     nnedi3_args: Mapping[str, Any] = {},
     eedi3_args: Mapping[str, Any] = {},
-    opencl: bool = False,
-    device: int | None = None,
+    vulkan: bool = False,
 ) -> vs.VideoNode:
     """
     Source-match, a three stage process that takes the difference between deinterlaced input and the original interlaced source, to shift the input more towards
@@ -1787,28 +1737,23 @@ def QTGMC_ApplySourceMatch(
             TFF=TFF,
             nnedi3_args=nnedi3_args,
             eedi3_args=eedi3_args,
-            opencl=opencl,
-            device=device,
+            vulkan=vulkan,
         )
         if MatchTR1 > 0:
-            match1Super = match1Edi.mv.Super(
-                pel=SubPel, sharp=SubPelInterp, levels=1, hpad=hpad, vpad=vpad
-            )
-            match1Degrain1 = core.mv.Degrain1(
+            match1Super = match1Edi.mvu.Super(onelevel=True, **super_args)
+            match1Degrain1 = core.mvu.Degrain1(
                 match1Edi,
                 match1Super,
-                bVec1,
-                fVec1,
+                [bVec1, fVec1],
                 thsad=ThSAD1,
                 thscd1=ThSCD1,
                 thscd2=ThSCD2,
             )
         if MatchTR1 > 1:
-            match1Degrain2 = core.mv.Degrain1(
+            match1Degrain2 = core.mvu.Degrain1(
                 match1Edi,
                 match1Super,
-                bVec2,
-                fVec2,
+                [bVec2, fVec2],
                 thsad=ThSAD1,
                 thscd1=ThSCD1,
                 thscd2=ThSCD2,
@@ -1863,28 +1808,23 @@ def QTGMC_ApplySourceMatch(
             TFF=TFF,
             nnedi3_args=nnedi3_args,
             eedi3_args=eedi3_args,
-            opencl=opencl,
-            device=device,
+            vulkan=vulkan,
         )
         if MatchTR2 > 0:
-            match2Super = match2Edi.mv.Super(
-                pel=SubPel, sharp=SubPelInterp, levels=1, hpad=hpad, vpad=vpad
-            )
-            match2Degrain1 = core.mv.Degrain1(
+            match2Super = match2Edi.mvu.Super(onelevel=True, **super_args)
+            match2Degrain1 = core.mvu.Degrain1(
                 match2Edi,
                 match2Super,
-                bVec1,
-                fVec1,
+                [bVec1, fVec1],
                 thsad=ThSAD1,
                 thscd1=ThSCD1,
                 thscd2=ThSCD2,
             )
         if MatchTR2 > 1:
-            match2Degrain2 = core.mv.Degrain1(
+            match2Degrain2 = core.mvu.Degrain1(
                 match2Edi,
                 match2Super,
-                bVec2,
-                fVec2,
+                [bVec2, fVec2],
                 thsad=ThSAD1,
                 thscd1=ThSCD1,
                 thscd2=ThSCD2,
@@ -1916,24 +1856,20 @@ def QTGMC_ApplySourceMatch(
         )
     if SourceMatch > 2:
         if MatchTR2 > 0:
-            match3Super = match3Update.mv.Super(
-                pel=SubPel, sharp=SubPelInterp, levels=1, hpad=hpad, vpad=vpad
-            )
-            match3Degrain1 = core.mv.Degrain1(
+            match3Super = match3Update.mvu.Super(onelevel=True, **super_args)
+            match3Degrain1 = core.mvu.Degrain1(
                 match3Update,
                 match3Super,
-                bVec1,
-                fVec1,
+                [bVec1, fVec1],
                 thsad=ThSAD1,
                 thscd1=ThSCD1,
                 thscd2=ThSCD2,
             )
         if MatchTR2 > 1:
-            match3Degrain2 = core.mv.Degrain1(
+            match3Degrain2 = core.mvu.Degrain1(
                 match3Update,
                 match3Super,
-                bVec2,
-                fVec2,
+                [bVec2, fVec2],
                 thsad=ThSAD1,
                 thscd1=ThSCD1,
                 thscd2=ThSCD2,
@@ -1963,23 +1899,3 @@ def QTGMC_SetUserGlobal(Prefix: str, Name: str, Value: vs.VideoNode | None) -> N
 def QTGMC_GetUserGlobal(Prefix: str, Name: str) -> vs.VideoNode | None:
     """Return value of global variable called "Prefix_Name". Returns None if it doesn't exist"""
     return QTGMC_globals.get(f"{Prefix}_{Name}")
-
-
-def scdetect(clip: vs.VideoNode, threshold: float = 0.1) -> vs.VideoNode:
-    def _copy_property(n: int, f: list[vs.VideoFrame]) -> vs.VideoFrame:
-        fout = f[0].copy()
-        fout.props["_SceneChangePrev"] = f[1].props["_SceneChangePrev"]
-        fout.props["_SceneChangeNext"] = f[1].props["_SceneChangeNext"]
-        return fout
-
-    assert check_variable(clip, scdetect)
-
-    sc = clip
-    if clip.format.color_family == vs.RGB:
-        sc = clip.resize.Point(format=vs.GRAY8, matrix_s="709")
-
-    sc = sc.misc.SCDetect(threshold)
-    if clip.format.color_family == vs.RGB:
-        sc = clip.std.ModifyFrame([clip, sc], _copy_property)
-
-    return sc
